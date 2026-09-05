@@ -289,14 +289,33 @@ jobs:
           docker run --rm --entrypoint /bin/sh "$IMAGE_DIGEST_REF" -c \
             'test "$(dpkg-query -W -f="\${Version}" util-linux)" = "2.41.5-0+deb13u1" && test "$(dpkg-query -W -f="\${Version}" libcap2)" = "1:2.75-10+deb13u1+b1" && test ! -e /opt/hermes/node_modules && ! command -v npm && ! command -v npx && ! command -v node && ! command -v uv && ! command -v uvx && /opt/hermes/.venv/bin/python -c '\''import tornado; assert tornado.version == "6.5.8"'\'''
 
+          export HERMES_DASHBOARD_BASIC_AUTH_USERNAME=ci-smoke
+          export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$(openssl rand -hex 32)"
+          export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
+          echo "::add-mask::$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"
+          echo "::add-mask::$HERMES_DASHBOARD_BASIC_AUTH_SECRET"
+          container_id=""
+          cleanup() {
+            status=$?
+            if [ -n "${container_id:-}" ]; then
+              if [ "$status" -ne 0 ]; then
+                docker inspect --format \
+                  'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{json .State.Error}}' \
+                  "$container_id" || true
+                docker top "$container_id" -eo pid,ppid,user,stat,comm,args 2>&1 || true
+              fi
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            return "$status"
+          }
+          trap cleanup EXIT
           container_id="$(docker run -d --rm \
             -p 127.0.0.1:19119:9119 \
-            -e HERMES_DASHBOARD=1 \
-            -e HERMES_DASHBOARD_HOST=0.0.0.0 \
-            -e HERMES_DASHBOARD_OAUTH_CLIENT_ID=ci-smoke \
-            "$IMAGE_DIGEST_REF" sleep infinity)"
-          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
+            -e HERMES_DASHBOARD_BASIC_AUTH_USERNAME \
+            -e HERMES_DASHBOARD_BASIC_AUTH_PASSWORD \
+            -e HERMES_DASHBOARD_BASIC_AUTH_SECRET \
+            "$IMAGE_DIGEST_REF" dashboard \
+              --host 0.0.0.0 --port 9119 --no-open)"
           ready=false
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:19119/api/status >/dev/null; then
