@@ -70,4 +70,18 @@ def test_workflow_consumes_generated_hardened_dockerfile_and_smoke_gates_securit
     assert "/api/status" in smoke_text
     assert "/api/sessions" in smoke_text
     assert "tornado.version == \"6.5.8\"" in smoke_text
+    assert "HERMES_DASHBOARD_BASIC_AUTH_USERNAME" in smoke_text
+    assert "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" in smoke_text
+    assert "HERMES_DASHBOARD_BASIC_AUTH_SECRET" in smoke_text
+    assert "HERMES_DASHBOARD_OAUTH_CLIENT_ID" not in smoke_text
+    assert "::add-mask::" in smoke_text
+    assert 'container_id=""' in smoke_text
+    assert '${container_id:-}' in smoke_text
+    assert "docker top" in smoke_text
+    assert "s6-svstat /run/service/dashboard" not in smoke_text
+    assert "docker logs" not in smoke_text
+    assert "sleep infinity" not in smoke_text
+    assert "--host 0.0.0.0 --port 9119 --no-open" in smoke_text
+    assert "HERMES_DASHBOARD=1" not in smoke_text
+    assert "HERMES_DASHBOARD_HOST" not in smoke_text
     assert "allowlist': []" in workflow_text
