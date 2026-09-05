@@ -24,6 +24,7 @@ def validate_contract() -> list[str]:
         "artifacts/source-sha.txt",
         "artifacts/image-digest.txt",
         "artifacts/build-metadata.json",
+        "metadata-file: artifacts/build-metadata.json",
         "artifacts/build-status.json",
         "artifacts/canary-manifest.json",
         "artifacts/security-status.json",
@@ -51,8 +52,10 @@ def validate_contract() -> list[str]:
         errors.append("workflow must not publish latest tags")
     if "provenance: false" in workflow:
         errors.append("workflow must preserve provenance")
-    if "metadata-file: artifacts/build-metadata.json" not in workflow:
+    if "build_metadata': 'artifacts/build-metadata.json" not in workflow:
         errors.append("workflow missing build metadata artifact")
+    if "workflow_run" not in workflow:
+        errors.append("workflow missing workflow run reference")
     if "if: steps.enforce_policy.outcome == 'success'" not in workflow:
         errors.append("workflow must only write the success manifest after policy pass")
 
