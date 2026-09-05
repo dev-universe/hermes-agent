@@ -1,0 +1,520 @@
+name: Hermes canary image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-hex Hermes commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SOURCE_REPOSITORY: https://github.com/dev-universe/hermes-agent.git
+  IMAGE_REPOSITORY: ghcr.io/dev-universe/hermes-agent-canary
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  IMAGE_REF: ghcr.io/dev-universe/hermes-agent-canary:sha-${{ inputs.source_sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.capture_digest.outputs.image_ref }}
+      image_digest: ${{ steps.capture_digest.outputs.image_digest }}
+      image_digest_ref: ${{ steps.capture_digest.outputs.image_digest_ref }}
+    steps:
+      - name: Validate source SHA
+        id: validate_source_sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          source_sha = os.environ['SOURCE_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', source_sha):
+              raise SystemExit('source_sha must be a 40-hex lowercase commit SHA')
+          PY
+
+      - name: Initialize build artifact workspace
+        id: init_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts hermes-source
+
+      - name: Log in to GHCR
+        id: login_ghcr
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone exact Hermes source
+        id: clone_source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-tags "$SOURCE_REPOSITORY" hermes-source
+          git -C hermes-source checkout --force "$SOURCE_SHA"
+          actual_source_sha="$(git -C hermes-source rev-parse HEAD)"
+          if [ "$actual_source_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::checked out $actual_source_sha, expected $SOURCE_SHA"
+            exit 1
+          fi
+          printf '%s\n' "$actual_source_sha" > artifacts/source-sha.txt
+
+      - name: Set up Docker Buildx
+        id: setup_buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # docker/setup-buildx-action@v3
+
+      - name: Build and push Hermes canary image
+        id: build_image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # docker/build-push-action@v6
+        with:
+          context: ./hermes-source
+          file: ./hermes-source/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_REF }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/dev-universe/hermes-agent
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.title=Hermes canary image
+          build-args: |
+            HERMES_GIT_SHA=${{ inputs.source_sha }}
+          metadata-file: artifacts/build-metadata.json
+          provenance: true
+
+      - name: Capture image digest
+        id: capture_digest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest='${{ steps.build_image.outputs.digest }}'
+          image_ref='${{ env.IMAGE_REF }}'
+          if [ -n "$digest" ]; then
+            printf '%s@%s\n' "$image_ref" "$digest" > artifacts/image-digest.txt
+            {
+              printf 'image_ref=%s\n' "$image_ref"
+              printf 'image_digest=%s\n' "$digest"
+              printf 'image_digest_ref=%s@%s\n' "$image_ref" "$digest"
+            } >> "$GITHUB_OUTPUT"
+          else
+            : > artifacts/image-digest.txt
+          fi
+
+      - name: Write build status
+        id: write_build_status
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          VALIDATE_SOURCE_SHA_OUTCOME: ${{ steps.validate_source_sha.outcome }}
+          INIT_ARTIFACTS_OUTCOME: ${{ steps.init_artifacts.outcome }}
+          LOGIN_GHCR_OUTCOME: ${{ steps.login_ghcr.outcome }}
+          CLONE_SOURCE_OUTCOME: ${{ steps.clone_source.outcome }}
+          SETUP_BUILDX_OUTCOME: ${{ steps.setup_buildx.outcome }}
+          BUILD_IMAGE_OUTCOME: ${{ steps.build_image.outcome }}
+          CAPTURE_DIGEST_OUTCOME: ${{ steps.capture_digest.outcome }}
+          SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          outcomes = [
+              ('validate_source_sha', os.environ['VALIDATE_SOURCE_SHA_OUTCOME']),
+              ('init_artifacts', os.environ['INIT_ARTIFACTS_OUTCOME']),
+              ('login_ghcr', os.environ['LOGIN_GHCR_OUTCOME']),
+              ('clone_source', os.environ['CLONE_SOURCE_OUTCOME']),
+              ('setup_buildx', os.environ['SETUP_BUILDX_OUTCOME']),
+              ('build_image', os.environ['BUILD_IMAGE_OUTCOME']),
+              ('capture_digest', os.environ['CAPTURE_DIGEST_OUTCOME']),
+          ]
+          failure_stage = next((name for name, outcome in outcomes if outcome != 'success'), '')
+          status = {
+              'schema_version': 1,
+              'job_name': 'build',
+              'job_status': os.environ['JOB_STATUS'],
+              'failure_stage': failure_stage,
+              'source_repository': os.environ['SOURCE_REPOSITORY'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'image_repository': os.environ['IMAGE_REPOSITORY'],
+              'image_ref': os.environ['IMAGE_REF'],
+              'image_digest_ref': '${{ steps.capture_digest.outputs.image_digest_ref }}',
+              'step_outcomes': {name: outcome for name, outcome in outcomes},
+              'artifacts': {
+                  'digest': 'artifacts/image-digest.txt',
+                  'source_sha': 'artifacts/source-sha.txt',
+                  'build_metadata': 'artifacts/build-metadata.json',
+                  'status': 'artifacts/build-status.json',
+              },
+              'policy': {
+                  'platform': 'linux/amd64',
+                  'full_source_image': True,
+                  'mutable_tags': False,
+              },
+          }
+          Path('artifacts/build-status.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Upload build artifacts
+        id: upload_build_artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact@v4
+        with:
+          name: hermes-canary-image-build-${{ inputs.source_sha }}
+          path: |
+            artifacts/image-digest.txt
+            artifacts/source-sha.txt
+            artifacts/build-metadata.json
+            artifacts/build-status.json
+          if-no-files-found: warn
+
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+    steps:
+      - name: Initialize SBOM artifact workspace
+        id: init_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+      - name: Log in to GHCR
+        id: login_ghcr
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare SBOM artifact paths
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'spdx_path=%s\n' "artifacts/hermes.spdx.json"
+            printf 'cyclonedx_path=%s\n' "artifacts/hermes.cyclonedx.json"
+            printf 'sbom_status_path=%s\n' "artifacts/sbom-status.json"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate Hermes SPDX SBOM
+        id: hermes_spdx
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_DIGEST_REF }}
+          format: spdx-json
+          output-file: ${{ steps.prep.outputs.spdx_path }}
+          upload-artifact: false
+
+      - name: Generate Hermes CycloneDX SBOM
+        id: hermes_cyclonedx
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_DIGEST_REF }}
+          format: cyclonedx-json
+          output-file: ${{ steps.prep.outputs.cyclonedx_path }}
+          upload-artifact: false
+
+      - name: Write SBOM status
+        id: write_sbom_status
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          BUILD_JOB_RESULT: ${{ needs.build.result }}
+          LOGIN_GHCR_OUTCOME: ${{ steps.login_ghcr.outcome }}
+          PREP_OUTCOME: ${{ steps.prep.outcome }}
+          HERMES_SPDX_OUTCOME: ${{ steps.hermes_spdx.outcome }}
+          HERMES_CYCLONEDX_OUTCOME: ${{ steps.hermes_cyclonedx.outcome }}
+          IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          outcomes = [
+              ('login_ghcr', os.environ['LOGIN_GHCR_OUTCOME']),
+              ('prep', os.environ['PREP_OUTCOME']),
+              ('hermes_spdx', os.environ['HERMES_SPDX_OUTCOME']),
+              ('hermes_cyclonedx', os.environ['HERMES_CYCLONEDX_OUTCOME']),
+          ]
+          failure_stage = next((name for name, outcome in outcomes if outcome != 'success'), '')
+          status = {
+              'schema_version': 1,
+              'job_name': 'sbom',
+              'job_status': os.environ['JOB_STATUS'],
+              'build_job_result': os.environ['BUILD_JOB_RESULT'],
+              'failure_stage': failure_stage,
+              'image_digest_ref': os.environ['IMAGE_DIGEST_REF'],
+              'step_outcomes': {name: outcome for name, outcome in outcomes},
+              'artifacts': {
+                  'status': 'artifacts/sbom-status.json',
+                  'spdx': 'artifacts/hermes.spdx.json',
+                  'cyclonedx': 'artifacts/hermes.cyclonedx.json',
+              },
+          }
+          Path('artifacts/sbom-status.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Upload SBOM artifacts
+        id: upload_sbom_artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact@v4
+        with:
+          name: hermes-canary-image-sbom-${{ inputs.source_sha }}
+          path: |
+            artifacts/hermes.spdx.json
+            artifacts/hermes.cyclonedx.json
+            artifacts/sbom-status.json
+          if-no-files-found: warn
+
+  security:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+      SOURCE_REPOSITORY: https://github.com/dev-universe/hermes-agent.git
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      IMAGE_REPOSITORY: ghcr.io/dev-universe/hermes-agent-canary
+    steps:
+      - name: Initialize security artifact workspace
+        id: init_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+      - name: Log in to GHCR
+        id: login_ghcr
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare security artifact paths
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'vuln_json_path=%s\n' "artifacts/trivy-vuln.json"
+            printf 'secret_json_path=%s\n' "artifacts/trivy-secret.json"
+            printf 'security_status_path=%s\n' "artifacts/security-status.json"
+            printf 'manifest_path=%s\n' "artifacts/canary-manifest.json"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Scan Hermes image for vulnerabilities
+        id: scan_vuln
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_DIGEST_REF }}
+          scanners: vuln
+          format: json
+          output: ${{ steps.prep.outputs.vuln_json_path }}
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+      - name: Scan Hermes image for secrets
+        id: scan_secret
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_DIGEST_REF }}
+          scanners: secret
+          format: json
+          output: ${{ steps.prep.outputs.secret_json_path }}
+          exit-code: 0
+
+      - name: Enforce fail-closed Trivy policy
+        id: enforce_policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_trivy_reports.py \
+            --vuln-report "${{ steps.prep.outputs.vuln_json_path }}" \
+            --secret-report "${{ steps.prep.outputs.secret_json_path }}"
+
+      - name: Write canary manifest
+        id: write_manifest
+        if: steps.enforce_policy.outcome == 'success'
+        shell: bash
+        env:
+          SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = {
+              'schema_version': 1,
+              'workflow': 'hermes-canary-image',
+              'source_repository': os.environ['SOURCE_REPOSITORY'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'image_repository': os.environ['IMAGE_REPOSITORY'],
+              'image_tag': os.environ['IMAGE_REF'],
+              'image_digest': os.environ['IMAGE_DIGEST_REF'].split('@', 1)[1],
+              'image_digest_ref': os.environ['IMAGE_DIGEST_REF'],
+              'workflow_run': {
+                  'id': int(os.environ['WORKFLOW_RUN_ID']),
+                  'attempt': int(os.environ['WORKFLOW_RUN_ATTEMPT']),
+                  'url': os.environ['WORKFLOW_URL'],
+              },
+              'platforms': ['linux/amd64'],
+              'artifacts': {
+                  'build_status': 'artifacts/build-status.json',
+                  'build_metadata': 'artifacts/build-metadata.json',
+                  'sbom_status': 'artifacts/sbom-status.json',
+                  'security_status': 'artifacts/security-status.json',
+                  'vuln_json': 'artifacts/trivy-vuln.json',
+                  'secret_json': 'artifacts/trivy-secret.json',
+              },
+              'provenance': {
+                  'reference': 'artifacts/build-metadata.json',
+              },
+              'policy': {
+                  'fixable_high_critical': 'zero',
+                  'secret_findings': 'zero',
+                  'allowlist': [],
+              },
+          }
+          Path('artifacts/canary-manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Write security status
+        id: write_security_status
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          BUILD_JOB_RESULT: ${{ needs.build.result }}
+          LOGIN_GHCR_OUTCOME: ${{ steps.login_ghcr.outcome }}
+          PREP_OUTCOME: ${{ steps.prep.outcome }}
+          SCAN_VULN_OUTCOME: ${{ steps.scan_vuln.outcome }}
+          SCAN_SECRET_OUTCOME: ${{ steps.scan_secret.outcome }}
+          ENFORCE_POLICY_OUTCOME: ${{ steps.enforce_policy.outcome }}
+          WRITE_MANIFEST_OUTCOME: ${{ steps.write_manifest.outcome }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          IMAGE_DIGEST_REF: ${{ env.IMAGE_DIGEST_REF }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          outcomes = [
+              ('login_ghcr', os.environ['LOGIN_GHCR_OUTCOME']),
+              ('prep', os.environ['PREP_OUTCOME']),
+              ('scan_vuln', os.environ['SCAN_VULN_OUTCOME']),
+              ('scan_secret', os.environ['SCAN_SECRET_OUTCOME']),
+              ('enforce_policy', os.environ['ENFORCE_POLICY_OUTCOME']),
+              ('write_manifest', os.environ['WRITE_MANIFEST_OUTCOME']),
+          ]
+          failure_stage = next((name for name, outcome in outcomes if outcome != 'success'), '')
+          status = {
+              'schema_version': 1,
+              'job_name': 'security',
+              'job_status': os.environ['JOB_STATUS'],
+              'build_job_result': os.environ['BUILD_JOB_RESULT'],
+              'failure_stage': failure_stage,
+              'image_ref': os.environ['IMAGE_REF'],
+              'image_digest_ref': os.environ['IMAGE_DIGEST_REF'],
+              'step_outcomes': {name: outcome for name, outcome in outcomes},
+              'artifacts': {
+                  'manifest': 'artifacts/canary-manifest.json',
+                  'status': 'artifacts/security-status.json',
+                  'build_metadata': 'artifacts/build-metadata.json',
+                  'vuln_json': 'artifacts/trivy-vuln.json',
+                  'secret_json': 'artifacts/trivy-secret.json',
+              },
+              'provenance': {
+                  'reference': 'artifacts/build-metadata.json',
+                  'attestation': 'registry-attestation',
+              },
+              'policy': {
+                  'fixable_high_critical': 'zero',
+                  'secret_findings': 'zero',
+                  'allowlist': [],
+              },
+          }
+          Path('artifacts/security-status.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Upload security artifacts
+        id: upload_security_artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact@v4
+        with:
+          name: hermes-canary-image-security-${{ inputs.source_sha }}
+          path: |
+            artifacts/canary-manifest.json
+            artifacts/security-status.json
+            artifacts/build-metadata.json
+            artifacts/trivy-vuln.json
+            artifacts/trivy-secret.json
+          if-no-files-found: warn
