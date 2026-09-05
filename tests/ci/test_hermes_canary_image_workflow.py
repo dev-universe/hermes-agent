@@ -29,6 +29,15 @@ def validate_contract() -> list[str]:
         "artifacts/build-metadata.json",
         "steps.build_image.outputs.metadata",
         "build_metadata_ref",
+        "Checkout trusted hardening recipe",
+        "Render dashboard-only canary Dockerfile",
+        "hermes-source/Dockerfile.canary",
+        "target: dashboard_canary",
+        "source-dockerfile.sha256",
+        "hardening-fragment.sha256",
+        "rendered-dockerfile.sha256",
+        "Validate dashboard-only runtime",
+        "smoke-status.json",
         "Checkout trusted workflow source",
         "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
         "ref: ${{ github.sha }}",
@@ -70,10 +79,12 @@ def validate_contract() -> list[str]:
         errors.append("workflow must only write the success manifest after policy pass")
     if "canary-image-release.yml" in workflow:
         errors.append("workflow must not reference the duplicate canary-image-release filename")
+    if "file: ./hermes-source/Dockerfile\n" in workflow:
+        errors.append("workflow must not build the unhardened exact-source Dockerfile directly")
 
     for token in [
-        "full source image",
-        "exact Hermes source commit",
+        "exact application source",
+        "dashboard-only hardening recipe",
         "immutable GHCR SHA tag",
         "secret finding",
         "fail-closed",

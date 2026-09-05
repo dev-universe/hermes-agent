@@ -1,0 +1,45 @@
+# Dashboard-only canary stage. The renderer appends this to the exact source
+# Dockerfile after naming its final runtime stage `hermes_runtime`.
+FROM hermes_runtime AS dashboard_canary
+
+USER root
+
+ARG TORNADO_WHEEL_URL="https://files.pythonhosted.org/packages/6e/de/f2e733f386b85962d1b1dc82cd63d169b5b4580062b35397eac9244a41fe/tornado-6.5.8-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+ARG TORNADO_WHEEL_SHA256="547d63f450d570c14fe0e8db2cfb14c9bbd1c2503b4a6612586267955aa47b58"
+
+RUN set -eux; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends --only-upgrade \
+      'bsdutils=1:2.41.5-0+deb13u1' \
+      'libblkid1=2.41.5-0+deb13u1' \
+      'libcap2=1:2.75-10+deb13u1+b1' \
+      'liblastlog2-2=2.41.5-0+deb13u1' \
+      'libmount1=2.41.5-0+deb13u1' \
+      'libsmartcols1=2.41.5-0+deb13u1' \
+      'libuuid1=2.41.5-0+deb13u1' \
+      'login=1:4.16.0-2+really2.41.5-0+deb13u1' \
+      'mount=2.41.5-0+deb13u1' \
+      'util-linux=2.41.5-0+deb13u1'; \
+    rm -rf /var/lib/apt/lists/*; \
+    tornado_wheel=/tmp/tornado-6.5.8-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl; \
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+      "$TORNADO_WHEEL_URL" -o "$tornado_wheel"; \
+    printf '%s  %s\n' "$TORNADO_WHEEL_SHA256" "$tornado_wheel" | sha256sum -c -; \
+    /usr/local/bin/uv pip install --python /opt/hermes/.venv/bin/python \
+      --no-cache --no-deps "$tornado_wheel"; \
+    /opt/hermes/.venv/bin/python -c \
+      'import tornado; assert tornado.version == "6.5.8", tornado.version'; \
+    rm -f "$tornado_wheel"; \
+    rm -rf /opt/hermes/node_modules /usr/local/lib/node_modules/npm; \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/node \
+      /usr/local/bin/uv /usr/local/bin/uvx; \
+    test ! -e /opt/hermes/node_modules; \
+    test ! -e /usr/local/lib/node_modules/npm; \
+    ! command -v npm; \
+    ! command -v npx; \
+    ! command -v node; \
+    ! command -v uv; \
+    ! command -v uvx
+
+LABEL org.opencontainers.image.title="Hermes dashboard canary" \
+      org.opencontainers.image.description="Exact-source hardened dashboard-only runtime"

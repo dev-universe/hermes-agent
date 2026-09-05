@@ -51,6 +51,14 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts hermes-source
 
+      - name: Checkout trusted hardening recipe
+        id: checkout_recipe
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-source
+          persist-credentials: false
+
       - name: Log in to GHCR
         id: login_ghcr
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # docker/login-action@v3
@@ -73,6 +81,17 @@ jobs:
           fi
           printf '%s\n' "$actual_source_sha" > artifacts/source-sha.txt
 
+      - name: Render dashboard-only canary Dockerfile
+        id: render_canary_dockerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 workflow-source/.github/scripts/render_dashboard_canary_dockerfile.py \
+            --source hermes-source/Dockerfile \
+            --fragment workflow-source/.github/docker/dashboard-canary.fragment \
+            --output hermes-source/Dockerfile.canary \
+            --artifact-dir artifacts
+
       - name: Set up Docker Buildx
         id: setup_buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # docker/setup-buildx-action@v3
@@ -82,7 +101,8 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # docker/build-push-action@v6
         with:
           context: ./hermes-source
-          file: ./hermes-source/Dockerfile
+          file: ./hermes-source/Dockerfile.canary
+          target: dashboard_canary
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_REF }}
@@ -156,8 +176,10 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           VALIDATE_SOURCE_SHA_OUTCOME: ${{ steps.validate_source_sha.outcome }}
           INIT_ARTIFACTS_OUTCOME: ${{ steps.init_artifacts.outcome }}
+          CHECKOUT_RECIPE_OUTCOME: ${{ steps.checkout_recipe.outcome }}
           LOGIN_GHCR_OUTCOME: ${{ steps.login_ghcr.outcome }}
           CLONE_SOURCE_OUTCOME: ${{ steps.clone_source.outcome }}
+          RENDER_CANARY_DOCKERFILE_OUTCOME: ${{ steps.render_canary_dockerfile.outcome }}
           SETUP_BUILDX_OUTCOME: ${{ steps.setup_buildx.outcome }}
           BUILD_IMAGE_OUTCOME: ${{ steps.build_image.outcome }}
           CAPTURE_DIGEST_OUTCOME: ${{ steps.capture_digest.outcome }}
@@ -179,8 +201,10 @@ jobs:
           outcomes = [
               ('validate_source_sha', os.environ['VALIDATE_SOURCE_SHA_OUTCOME']),
               ('init_artifacts', os.environ['INIT_ARTIFACTS_OUTCOME']),
+              ('checkout_recipe', os.environ['CHECKOUT_RECIPE_OUTCOME']),
               ('login_ghcr', os.environ['LOGIN_GHCR_OUTCOME']),
               ('clone_source', os.environ['CLONE_SOURCE_OUTCOME']),
+              ('render_canary_dockerfile', os.environ['RENDER_CANARY_DOCKERFILE_OUTCOME']),
               ('setup_buildx', os.environ['SETUP_BUILDX_OUTCOME']),
               ('build_image', os.environ['BUILD_IMAGE_OUTCOME']),
               ('capture_digest', os.environ['CAPTURE_DIGEST_OUTCOME']),
@@ -200,6 +224,9 @@ jobs:
               'artifacts': {
                   'digest': 'artifacts/image-digest.txt',
                   'source_sha': 'artifacts/source-sha.txt',
+                  'source_dockerfile_sha256': 'artifacts/source-dockerfile.sha256',
+                  'hardening_fragment_sha256': 'artifacts/hardening-fragment.sha256',
+                  'rendered_dockerfile_sha256': 'artifacts/rendered-dockerfile.sha256',
                   'build_metadata': os.environ['BUILD_METADATA_REF'],
                   'status': 'artifacts/build-status.json',
               },
@@ -224,8 +251,85 @@ jobs:
           path: |
             artifacts/image-digest.txt
             artifacts/source-sha.txt
+            artifacts/source-dockerfile.sha256
+            artifacts/hardening-fragment.sha256
+            artifacts/rendered-dockerfile.sha256
             artifacts/build-metadata.json
             artifacts/build-status.json
+          if-no-files-found: warn
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+    steps:
+      - name: Initialize smoke artifact workspace
+        run: mkdir -p artifacts
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate dashboard-only runtime
+        id: runtime_smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_DIGEST_REF"
+          docker run --rm "$IMAGE_DIGEST_REF" --help >/dev/null
+          docker run --init --rm "$IMAGE_DIGEST_REF" --help >/dev/null
+          docker run --rm "$IMAGE_DIGEST_REF" dashboard --help >/dev/null
+          docker run --rm --entrypoint /bin/sh "$IMAGE_DIGEST_REF" -c \
+            'test "$(dpkg-query -W -f="\${Version}" util-linux)" = "2.41.5-0+deb13u1" && test "$(dpkg-query -W -f="\${Version}" libcap2)" = "1:2.75-10+deb13u1+b1" && test ! -e /opt/hermes/node_modules && ! command -v npm && ! command -v npx && ! command -v node && ! command -v uv && ! command -v uvx && /opt/hermes/.venv/bin/python -c '\''import tornado; assert tornado.version == "6.5.8"'\'''
+
+          container_id="$(docker run -d --rm \
+            -p 127.0.0.1:19119:9119 \
+            -e HERMES_DASHBOARD=1 \
+            -e HERMES_DASHBOARD_HOST=0.0.0.0 \
+            -e HERMES_DASHBOARD_OAUTH_CLIENT_ID=ci-smoke \
+            "$IMAGE_DIGEST_REF" sleep infinity)"
+          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          ready=false
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:19119/api/status >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          [ "$ready" = true ]
+          code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:19119/api/sessions)"
+          [ "$code" = 401 ]
+          printf 'dashboard_status=200\nunauth_sessions=401\n' > artifacts/runtime-smoke.txt
+
+      - name: Write smoke status
+        if: always()
+        env:
+          SMOKE_OUTCOME: ${{ steps.runtime_smoke.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          outcome = os.environ['SMOKE_OUTCOME']
+          pathlib.Path('artifacts/smoke-status.json').write_text(
+              json.dumps({'job_name': 'smoke', 'outcome': outcome,
+                          'failure_stage': '' if outcome == 'success' else 'runtime_smoke'},
+                         indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact@v4
+        with:
+          name: hermes-canary-image-smoke-${{ inputs.source_sha }}
+          path: artifacts/*
           if-no-files-found: warn
 
   sbom:
@@ -342,7 +446,7 @@ jobs:
           if-no-files-found: warn
 
   security:
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -461,6 +565,10 @@ jobs:
               'artifacts': {
                   'build_status': 'artifacts/build-status.json',
                   'build_metadata': os.environ['BUILD_METADATA_REF'],
+                  'source_dockerfile_sha256': 'artifacts/source-dockerfile.sha256',
+                  'hardening_fragment_sha256': 'artifacts/hardening-fragment.sha256',
+                  'rendered_dockerfile_sha256': 'artifacts/rendered-dockerfile.sha256',
+                  'smoke_status': 'artifacts/smoke-status.json',
                   'sbom_status': 'artifacts/sbom-status.json',
                   'security_status': 'artifacts/security-status.json',
                   'vuln_json': 'artifacts/trivy-vuln.json',
@@ -468,6 +576,9 @@ jobs:
               },
               'provenance': {
                   'reference': 'artifacts/build-metadata.json',
+                  'source_dockerfile_sha256': 'artifacts/source-dockerfile.sha256',
+                  'hardening_fragment_sha256': 'artifacts/hardening-fragment.sha256',
+                  'rendered_dockerfile_sha256': 'artifacts/rendered-dockerfile.sha256',
               },
               'policy': {
                   'fixable_high_critical': 'zero',
