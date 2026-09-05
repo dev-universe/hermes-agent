@@ -21,6 +21,10 @@ def validate_contract() -> list[str]:
         "ghcr.io/dev-universe/hermes-agent-canary:sha-${{ inputs.source_sha }}",
         "https://github.com/dev-universe/hermes-agent.git",
         "linux/amd64",
+        "artifacts/source-sha.txt",
+        "artifacts/image-digest.txt",
+        "artifacts/build-metadata.json",
+        "artifacts/build-status.json",
         "artifacts/canary-manifest.json",
         "artifacts/security-status.json",
         "artifacts/sbom-status.json",
@@ -29,6 +33,10 @@ def validate_contract() -> list[str]:
         "scripts/ci/check_trivy_reports.py",
         "scanners: vuln",
         "scanners: secret",
+        "provenance: true",
+        "build_metadata",
+        "workflow_run",
+        "if: steps.enforce_policy.outcome == 'success'",
         "fixable_high_critical': 'zero",
         "secret_findings': 'zero",
         "allowlist': []",
@@ -41,6 +49,12 @@ def validate_contract() -> list[str]:
         errors.append("workflow must target the canary repository, not the base Hermes repository")
     if "ghcr.io/dev-universe/hermes-agent-canary:latest" in workflow:
         errors.append("workflow must not publish latest tags")
+    if "provenance: false" in workflow:
+        errors.append("workflow must preserve provenance")
+    if "metadata-file: artifacts/build-metadata.json" not in workflow:
+        errors.append("workflow missing build metadata artifact")
+    if "if: steps.enforce_policy.outcome == 'success'" not in workflow:
+        errors.append("workflow must only write the success manifest after policy pass")
 
     for token in [
         "full source image",
@@ -49,6 +63,7 @@ def validate_contract() -> list[str]:
         "secret finding",
         "fail-closed",
         "zero-allowlist",
+        "provenance",
         "ghcr.io/dev-universe/hermes-agent-canary",
     ]:
         if token not in docs:
@@ -68,3 +83,4 @@ def test_hermes_canary_image_workflow_rejects_base_repo_reference():
     )
     assert "ghcr.io/dev-universe/hermes-agent-canary" not in workflow
     assert "ghcr.io/dev-universe/hermes-agent:sha-${{ inputs.source_sha }}" in workflow
+    assert "provenance: true" in workflow

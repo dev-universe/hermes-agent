@@ -65,7 +65,12 @@ jobs:
           set -euo pipefail
           git clone --filter=blob:none --no-tags "$SOURCE_REPOSITORY" hermes-source
           git -C hermes-source checkout --force "$SOURCE_SHA"
-          git -C hermes-source rev-parse HEAD > artifacts/source-sha.txt
+          actual_source_sha="$(git -C hermes-source rev-parse HEAD)"
+          if [ "$actual_source_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::checked out $actual_source_sha, expected $SOURCE_SHA"
+            exit 1
+          fi
+          printf '%s\n' "$actual_source_sha" > artifacts/source-sha.txt
 
       - name: Set up Docker Buildx
         id: setup_buildx
@@ -86,7 +91,8 @@ jobs:
             org.opencontainers.image.title=Hermes canary image
           build-args: |
             HERMES_GIT_SHA=${{ inputs.source_sha }}
-          provenance: false
+          metadata-file: artifacts/build-metadata.json
+          provenance: true
 
       - name: Capture image digest
         id: capture_digest
@@ -157,6 +163,7 @@ jobs:
               'artifacts': {
                   'digest': 'artifacts/image-digest.txt',
                   'source_sha': 'artifacts/source-sha.txt',
+                  'build_metadata': 'artifacts/build-metadata.json',
                   'status': 'artifacts/build-status.json',
               },
               'policy': {
@@ -180,6 +187,7 @@ jobs:
           path: |
             artifacts/image-digest.txt
             artifacts/source-sha.txt
+            artifacts/build-metadata.json
             artifacts/build-status.json
           if-no-files-found: warn
 
@@ -371,7 +379,7 @@ jobs:
 
       - name: Write canary manifest
         id: write_manifest
-        if: always()
+        if: steps.enforce_policy.outcome == 'success'
         shell: bash
         env:
           SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
@@ -379,6 +387,9 @@ jobs:
           IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
           IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -394,15 +405,25 @@ jobs:
               'source_repository': os.environ['SOURCE_REPOSITORY'],
               'source_sha': os.environ['SOURCE_SHA'],
               'image_repository': os.environ['IMAGE_REPOSITORY'],
-              'image_ref': os.environ['IMAGE_REF'],
+              'image_tag': os.environ['IMAGE_REF'],
+              'image_digest': os.environ['IMAGE_DIGEST_REF'].split('@', 1)[1],
               'image_digest_ref': os.environ['IMAGE_DIGEST_REF'],
+              'workflow_run': {
+                  'id': int(os.environ['WORKFLOW_RUN_ID']),
+                  'attempt': int(os.environ['WORKFLOW_RUN_ATTEMPT']),
+                  'url': os.environ['WORKFLOW_URL'],
+              },
               'platforms': ['linux/amd64'],
               'artifacts': {
                   'build_status': 'artifacts/build-status.json',
+                  'build_metadata': 'artifacts/build-metadata.json',
                   'sbom_status': 'artifacts/sbom-status.json',
                   'security_status': 'artifacts/security-status.json',
                   'vuln_json': 'artifacts/trivy-vuln.json',
                   'secret_json': 'artifacts/trivy-secret.json',
+              },
+              'provenance': {
+                  'reference': 'artifacts/build-metadata.json',
               },
               'policy': {
                   'fixable_high_critical': 'zero',
@@ -431,6 +452,9 @@ jobs:
           WRITE_MANIFEST_OUTCOME: ${{ steps.write_manifest.outcome }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
           IMAGE_DIGEST_REF: ${{ env.IMAGE_DIGEST_REF }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -461,8 +485,13 @@ jobs:
               'artifacts': {
                   'manifest': 'artifacts/canary-manifest.json',
                   'status': 'artifacts/security-status.json',
+                  'build_metadata': 'artifacts/build-metadata.json',
                   'vuln_json': 'artifacts/trivy-vuln.json',
                   'secret_json': 'artifacts/trivy-secret.json',
+              },
+              'provenance': {
+                  'reference': 'artifacts/build-metadata.json',
+                  'attestation': 'registry-attestation',
               },
               'policy': {
                   'fixable_high_critical': 'zero',
@@ -485,6 +514,7 @@ jobs:
           path: |
             artifacts/canary-manifest.json
             artifacts/security-status.json
+            artifacts/build-metadata.json
             artifacts/trivy-vuln.json
             artifacts/trivy-secret.json
           if-no-files-found: warn
