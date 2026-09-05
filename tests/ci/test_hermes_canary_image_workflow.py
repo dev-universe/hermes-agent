@@ -106,10 +106,23 @@ def test_hermes_canary_image_workflow_contract_passes():
 
 def test_hermes_canary_image_workflow_security_env_is_static_literals() -> None:
     workflow = yaml.safe_load(read(".github/workflows/hermes-canary-image.yml"))
-    security_steps = [step["name"] for step in workflow["jobs"]["security"]["steps"]]
+    steps = workflow["jobs"]["security"]["steps"]
+    security_steps = [step["name"] for step in steps]
     assert security_steps.index("Checkout trusted workflow source") < security_steps.index(
-        "Enforce fail-closed Trivy policy"
+        "Initialize security artifact workspace"
     )
+    assert security_steps.index("Initialize security artifact workspace") < security_steps.index(
+        "Download build evidence"
+    )
+    assert security_steps.index("Download build evidence") < security_steps.index(
+        "Scan Hermes image for vulnerabilities"
+    )
+    checkout = next(step for step in steps if step["name"] == "Checkout trusted workflow source")
+    assert checkout["with"]["path"] == "workflow-source"
+    download = next(step for step in steps if step["name"] == "Download build evidence")
+    assert download["with"]["path"] == "artifacts"
+    enforce = next(step for step in steps if step["name"] == "Enforce fail-closed Trivy policy")
+    assert "workflow-source/scripts/ci/check_trivy_reports.py" in enforce["run"]
     assert workflow["jobs"]["security"]["env"] == {
         "IMAGE_DIGEST_REF": "${{ needs.build.outputs.image_digest_ref }}",
         "IMAGE_REF": "${{ needs.build.outputs.image_ref }}",
