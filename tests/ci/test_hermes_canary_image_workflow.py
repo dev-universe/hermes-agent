@@ -35,7 +35,7 @@ def validate_contract() -> list[str]:
         "scanners: vuln",
         "scanners: secret",
         "provenance: true",
-        "build_metadata",
+        "build_metadata': 'artifacts/build-metadata.json",
         "workflow_run",
         "if: steps.enforce_policy.outcome == 'success'",
         "fixable_high_critical': 'zero",
@@ -53,7 +53,7 @@ def validate_contract() -> list[str]:
     if "provenance: false" in workflow:
         errors.append("workflow must preserve provenance")
     if "build_metadata': 'artifacts/build-metadata.json" not in workflow:
-        errors.append("workflow missing build metadata artifact")
+        errors.append("workflow missing build metadata reference")
     if "workflow_run" not in workflow:
         errors.append("workflow missing workflow run reference")
     if "if: steps.enforce_policy.outcome == 'success'" not in workflow:
