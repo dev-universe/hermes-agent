@@ -478,12 +478,27 @@ jobs:
       SOURCE_SHA: ${{ inputs.source_sha }}
       IMAGE_REPOSITORY: ghcr.io/dev-universe/hermes-agent-canary
     steps:
+      - name: Checkout trusted workflow source
+        id: checkout_workflow
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-source
+          persist-credentials: false
+
       - name: Initialize security artifact workspace
         id: init_artifacts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
+
+      - name: Download build evidence
+        id: download_build_evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # actions/download-artifact@v4
+        with:
+          name: hermes-canary-image-build-${{ inputs.source_sha }}
+          path: artifacts
 
       - name: Log in to GHCR
         id: login_ghcr
@@ -492,12 +507,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Checkout trusted workflow source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
 
       - name: Prepare security artifact paths
         id: prep
@@ -540,7 +549,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/ci/check_trivy_reports.py \
+          python3 workflow-source/scripts/ci/check_trivy_reports.py \
             --vuln-report "${{ steps.prep.outputs.vuln_json_path }}" \
             --secret-report "${{ steps.prep.outputs.secret_json_path }}"
 
@@ -618,6 +627,9 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
           BUILD_JOB_RESULT: ${{ needs.build.result }}
+          CHECKOUT_WORKFLOW_OUTCOME: ${{ steps.checkout_workflow.outcome }}
+          INIT_ARTIFACTS_OUTCOME: ${{ steps.init_artifacts.outcome }}
+          DOWNLOAD_BUILD_EVIDENCE_OUTCOME: ${{ steps.download_build_evidence.outcome }}
           LOGIN_GHCR_OUTCOME: ${{ steps.login_ghcr.outcome }}
           PREP_OUTCOME: ${{ steps.prep.outcome }}
           SCAN_VULN_OUTCOME: ${{ steps.scan_vuln.outcome }}
@@ -639,6 +651,9 @@ jobs:
           from pathlib import Path
 
           outcomes = [
+              ('checkout_workflow', os.environ['CHECKOUT_WORKFLOW_OUTCOME']),
+              ('init_artifacts', os.environ['INIT_ARTIFACTS_OUTCOME']),
+              ('download_build_evidence', os.environ['DOWNLOAD_BUILD_EVIDENCE_OUTCOME']),
               ('login_ghcr', os.environ['LOGIN_GHCR_OUTCOME']),
               ('prep', os.environ['PREP_OUTCOME']),
               ('scan_vuln', os.environ['SCAN_VULN_OUTCOME']),
