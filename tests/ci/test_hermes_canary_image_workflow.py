@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -77,6 +79,17 @@ def validate_contract() -> list[str]:
 
 def test_hermes_canary_image_workflow_contract_passes():
     assert validate_contract() == []
+
+
+def test_hermes_canary_image_workflow_security_env_is_static_literals() -> None:
+    workflow = yaml.safe_load(read(".github/workflows/hermes-canary-image.yml"))
+    assert workflow["jobs"]["security"]["env"] == {
+        "IMAGE_DIGEST_REF": "${{ needs.build.outputs.image_digest_ref }}",
+        "IMAGE_REF": "${{ needs.build.outputs.image_ref }}",
+        "SOURCE_REPOSITORY": "https://github.com/dev-universe/hermes-agent.git",
+        "SOURCE_SHA": "${{ inputs.source_sha }}",
+        "IMAGE_REPOSITORY": "ghcr.io/dev-universe/hermes-agent-canary",
+    }
 
 
 def test_hermes_canary_image_workflow_rejects_base_repo_reference():

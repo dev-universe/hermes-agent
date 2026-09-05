@@ -313,9 +313,9 @@ jobs:
     env:
       IMAGE_DIGEST_REF: ${{ needs.build.outputs.image_digest_ref }}
       IMAGE_REF: ${{ needs.build.outputs.image_ref }}
-      SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
-      SOURCE_SHA: ${{ env.SOURCE_SHA }}
-      IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+      SOURCE_REPOSITORY: https://github.com/dev-universe/hermes-agent.git
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      IMAGE_REPOSITORY: ghcr.io/dev-universe/hermes-agent-canary
     steps:
       - name: Initialize security artifact workspace
         id: init_artifacts
